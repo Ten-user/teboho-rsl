@@ -29,7 +29,7 @@ app.get('/health',(req,res)=>res.json({ok:true,service:'teboho-api',time:new Dat
 app.post('/auth/register',asyncRoute(async(req,res)=>{
   const {name,email,password,location,business}=req.body||{};
   if(!name||!email||!password||!location||!business)return res.status(400).json({error:'All fields are required'});
-  if(!/^\\S+@\\S+\\.\\S+$/.test(String(email))||String(password).length<8)return res.status(400).json({error:'Enter a valid email and a password of at least 8 characters'});
+  if(!/^\S+@\S+\.\S+$/.test(String(email))||String(password).length<8)return res.status(400).json({error:'Enter a valid email and a password of at least 8 characters'});
   const normalized=String(email).trim().toLowerCase();
   const exists=await pool.query('SELECT 1 FROM officers WHERE email=$1 UNION SELECT 1 FROM taxpayers WHERE email=$1',[normalized]);
   if(exists.rowCount)return res.status(409).json({error:'An account with this email already exists'});
@@ -58,11 +58,46 @@ app.post('/auth/login',asyncRoute(async(req,res)=>{
   const taxpayer=await pool.query('SELECT * FROM taxpayers WHERE email=$1',[normalized]);
   const u=taxpayer.rows[0];
   if(!u||!await bcrypt.compare(password,u.password_hash))return res.status(401).json({error:'Invalid email or password'});
-  const token=jwt.sign({sub:u.id,email:u.email,role:'taxpayer',traderId:u.trader_id},process.env.JWT_SECRET,{expiresIn:'8h'});
+  const token=jwt.sign({sub:u.id,email:u.email,role:'taxpayer',name:u.name,traderId:u.trader_id},process.env.JWT_SECRET,{expiresIn:'8h'});
   res.json({token,user:{id:u.id,email:u.email,name:u.name,role:'taxpayer',traderId:u.trader_id}});
 }));
 app.use('/api',auth,(req,res,next)=>req.user.role==='officer'?next():res.status(403).json({error:'Officer access required'}));
 app.get('/api/me',(req,res)=>res.json({email:req.user.email}));
+app.get('/api/ussd/trader/:id',asyncRoute(async(req,res)=>{
+  const id=String(req.params.id||'').trim();
+  const r=await pool.query('SELECT id,name,phone,location,business,sales,tier,status,paid FROM traders WHERE id=$1',[id]);
+  if(!r.rowCount)return res.status(404).json({error:'Trader ID not found. Please register first.'});
+  const trader=r.rows[0];res.json({...trader,tax_due:tierAmount(trader.tier)});
+}));
+app.post('/api/ussd/register',asyncRoute(async(req,res)=>{
+  const {name,phone,location,business}=req.body||{};
+  const cleanName=String(name||'').trim(),cleanPhone=String(phone||'').replace(/[\\s()-]/g,'');
+  if(cleanName.length<2||cleanName.length>120||!/^\\+?[0-9]{8,15}$/.test(cleanPhone)||!location||!String(business||'').trim())return res.status(400).json({error:'Enter a full name, valid phone number, location and business type.'});
+  const id='TB-'+Date.now().toString(36).toUpperCase()+'-'+Math.floor(Math.random()*900+100);
+  const client=await pool.connect();
+  try{
+    await client.query('BEGIN');
+    const r=await client.query("INSERT INTO traders(id,name,phone,location,business,sales,tier,status) VALUES($1,$2,$3,$4,$5,0,'A','YELLOW') RETURNING id,name,phone,location,business,sales,tier,status",[id,cleanName,cleanPhone,String(location),String(business).trim()]);
+    await client.query('INSERT INTO audit(trader_id,action,actor) VALUES($1,$2,$3)',[id,'USSD self-registration','USSD simulator']);
+    await client.query('COMMIT');res.status(201).json(r.rows[0]);
+  }catch(e){await client.query('ROLLBACK');if(e.code==='23505')return res.status(409).json({error:'That phone number is already registered.'});throw e}finally{client.release()}
+}));
+app.post('/api/ussd/pay',asyncRoute(async(req,res)=>{
+  const {trader_id,wallet}=req.body||{};
+  if(!trader_id||!['M-Pesa','EcoCash'].includes(wallet))return res.status(400).json({error:'Choose a valid Trader ID and wallet.'});
+  const client=await pool.connect();
+  try{
+    await client.query('BEGIN');
+    const found=await client.query('SELECT id,name,tier FROM traders WHERE id=$1',[String(trader_id).trim()]);
+    if(!found.rowCount){await client.query('ROLLBACK');return res.status(404).json({error:'Trader ID not found.'})}
+    const trader=found.rows[0],due=tierAmount(trader.tier),receipt='DEMO-'+Date.now().toString(36).toUpperCase()+'-'+Math.floor(Math.random()*900+100);
+    const payment=await client.query("INSERT INTO tax_payments(trader_id,amount,wallet,receipt,status) VALUES($1,$2,$3,$4,'SIMULATED') RETURNING id,trader_id,amount,wallet,receipt,status,created_at",[trader.id,due,wallet,receipt]);
+    await client.query('INSERT INTO audit(trader_id,action,actor) VALUES($1,$2,$3)',[trader.id,'Simulated tax payment attempt: '+receipt+' ('+wallet+')','USSD simulator']);
+    await client.query('COMMIT');
+    res.status(201).json({payment:payment.rows[0],trader_name:trader.name,message:'Simulation successful. No money was transferred and the official paid status was not changed.'});
+  }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
+}));
+
 app.get('/taxpayer/profile',auth,asyncRoute(async(req,res)=>{if(req.user.role!=='taxpayer')return res.status(403).json({error:'Taxpayer access required'});const r=await pool.query('SELECT t.*,p.name,p.email FROM taxpayers p JOIN traders t ON t.id=p.trader_id WHERE p.id=$1',[req.user.sub]);if(!r.rowCount)return res.status(404).json({error:'Taxpayer profile not found'});res.json(r.rows[0])}));
 app.get('/api/dashboard',asyncRoute(async(req,res)=>{
   const [counts,priority,recent]=await Promise.all([
