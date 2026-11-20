@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken';
 import { pool, initDb } from './db.js';
 
 const app=express();
+app.set('trust proxy',1);
 app.use(helmet());
 app.use(cors({origin:(origin,cb)=>{
   const allowed=(process.env.FRONTEND_ORIGIN||'http://localhost:5173').split(',').map(x=>x.trim());
