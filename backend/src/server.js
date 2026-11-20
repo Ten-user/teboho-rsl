@@ -57,7 +57,7 @@ app.post('/auth/login',asyncRoute(async(req,res)=>{
   const taxpayer=await pool.query('SELECT * FROM taxpayers WHERE email=$1',[normalized]);
   const u=taxpayer.rows[0];
   if(!u||!await bcrypt.compare(password,u.password_hash))return res.status(401).json({error:'Invalid email or password'});
-  const token=jwt.sign({sub:u.id,email:u.email,role:'taxpayer',traderId:u.trader_id},{expiresIn:'8h'},process.env.JWT_SECRET);
+  const token=jwt.sign({sub:u.id,email:u.email,role:'taxpayer',traderId:u.trader_id},process.env.JWT_SECRET,{expiresIn:'8h'});
   res.json({token,user:{id:u.id,email:u.email,name:u.name,role:'taxpayer',traderId:u.trader_id}});
 }));
 app.use('/api',auth,(req,res,next)=>req.user.role==='officer'?next():res.status(403).json({error:'Officer access required'}));
