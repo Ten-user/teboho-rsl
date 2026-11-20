@@ -15,7 +15,7 @@ app.use(cors({origin:(origin,cb)=>{
   cb(new Error('Origin not allowed'));
 }}));
 app.use(express.json({limit:'100kb'}));
-app.use('/auth/login',rateLimit({windowMs:15*60*1000,limit:20,standardHeaders:true,legacyHeaders:false}));
+app.use(['/auth/login','/auth/register'],rateLimit({windowMs:15*60*1000,limit:10,standardHeaders:true,legacyHeaders:false}));
 const tierFor=n=>Number(n)<20000?'A':Number(n)<=80000?'B':'C';
 const tierAmount=t=>({A:50,B:200,C:450}[t]||50);
 const asyncRoute=fn=>(req,res,next)=>Promise.resolve(fn(req,res,next)).catch(next);
@@ -25,17 +25,44 @@ function auth(req,res,next){
 }
 const log=async(traderId,action,actor)=>pool.query('INSERT INTO audit(trader_id,action,actor) VALUES($1,$2,$3)',[traderId,action,actor]);
 app.get('/health',(req,res)=>res.json({ok:true,service:'teboho-api',time:new Date().toISOString()}));
+app.post('/auth/register',asyncRoute(async(req,res)=>{
+  const {name,email,password,location,business}=req.body||{};
+  if(!name||!email||!password||!location||!business)return res.status(400).json({error:'All fields are required'});
+  if(!/^\\S+@\\S+\\.\\S+$/.test(String(email))||String(password).length<8)return res.status(400).json({error:'Enter a valid email and a password of at least 8 characters'});
+  const normalized=String(email).trim().toLowerCase();
+  const exists=await pool.query('SELECT 1 FROM officers WHERE email=$1 UNION SELECT 1 FROM taxpayers WHERE email=$1',[normalized]);
+  if(exists.rowCount)return res.status(409).json({error:'An account with this email already exists'});
+  const client=await pool.connect();
+  try{
+    await client.query('BEGIN');
+    const traderId='TB-'+Date.now().toString().slice(-8);
+    const trader=await client.query("INSERT INTO traders(id,name,location,business,sales,tier,status) VALUES($1,$2,$3,$4,0,'A','YELLOW') RETURNING id",[traderId,String(name).trim(),String(location),String(business).trim()]);
+    const hash=await bcrypt.hash(String(password),12);
+    const account=await client.query('INSERT INTO taxpayers(name,email,password_hash,trader_id) VALUES($1,$2,$3,$4) RETURNING id,email,name,trader_id',[String(name).trim(),normalized,hash,trader.rows[0].id]);
+    await client.query('INSERT INTO audit(trader_id,action,actor) VALUES($1,$2,$3)',[traderId,'Taxpayer self-registration',normalized]);
+    await client.query('COMMIT');
+    const u=account.rows[0],token=jwt.sign({sub:u.id,email:u.email,role:'taxpayer',traderId:u.trader_id},process.env.JWT_SECRET,{expiresIn:'8h'});
+    res.status(201).json({token,user:{id:u.id,email:u.email,name:u.name,role:'taxpayer',traderId:u.trader_id}});
+  }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
+}));
 app.post('/auth/login',asyncRoute(async(req,res)=>{
   const {email,password}=req.body||{};
   if(!email||!password)return res.status(400).json({error:'Email and password are required'});
-  const q=await pool.query('SELECT * FROM officers WHERE email=$1',[String(email).toLowerCase()]);
-  const user=q.rows[0];
-  if(!user||!await bcrypt.compare(password,user.password_hash))return res.status(401).json({error:'Invalid email or password'});
-  const token=jwt.sign({sub:user.id,email:user.email},process.env.JWT_SECRET,{expiresIn:'8h'});
-  res.json({token,user:{email:user.email}});
+  const normalized=String(email).trim().toLowerCase();
+  const officer=await pool.query('SELECT * FROM officers WHERE email=$1',[normalized]);
+  if(officer.rows[0]&&await bcrypt.compare(password,officer.rows[0].password_hash)){
+    const u=officer.rows[0],token=jwt.sign({sub:u.id,email:u.email,role:'officer'},process.env.JWT_SECRET,{expiresIn:'8h'});
+    return res.json({token,user:{email:u.email,role:'officer'}});
+  }
+  const taxpayer=await pool.query('SELECT * FROM taxpayers WHERE email=$1',[normalized]);
+  const u=taxpayer.rows[0];
+  if(!u||!await bcrypt.compare(password,u.password_hash))return res.status(401).json({error:'Invalid email or password'});
+  const token=jwt.sign({sub:u.id,email:u.email,role:'taxpayer',traderId:u.trader_id},{expiresIn:'8h'},process.env.JWT_SECRET);
+  res.json({token,user:{id:u.id,email:u.email,name:u.name,role:'taxpayer',traderId:u.trader_id}});
 }));
-app.use('/api',auth);
+app.use('/api',auth,(req,res,next)=>req.user.role==='officer'?next():res.status(403).json({error:'Officer access required'}));
 app.get('/api/me',(req,res)=>res.json({email:req.user.email}));
+app.get('/taxpayer/profile',auth,asyncRoute(async(req,res)=>{if(req.user.role!=='taxpayer')return res.status(403).json({error:'Taxpayer access required'});const r=await pool.query('SELECT t.*,p.name,p.email FROM taxpayers p JOIN traders t ON t.id=p.trader_id WHERE p.id=$1',[req.user.sub]);if(!r.rowCount)return res.status(404).json({error:'Taxpayer profile not found'});res.json(r.rows[0])}));
 app.get('/api/dashboard',asyncRoute(async(req,res)=>{
   const [counts,priority,recent]=await Promise.all([
     pool.query("SELECT status,COUNT(*)::int AS count FROM traders GROUP BY status"),
