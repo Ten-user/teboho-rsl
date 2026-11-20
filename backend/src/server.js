@@ -71,8 +71,8 @@ app.get('/api/ussd/trader/:id',asyncRoute(async(req,res)=>{
 }));
 app.post('/api/ussd/register',asyncRoute(async(req,res)=>{
   const {name,phone,location,business}=req.body||{};
-  const cleanName=String(name||'').trim(),cleanPhone=String(phone||'').replace(/[\\s()-]/g,'');
-  if(cleanName.length<2||cleanName.length>120||!/^\\+?[0-9]{8,15}$/.test(cleanPhone)||!location||!String(business||'').trim())return res.status(400).json({error:'Enter a full name, valid phone number, location and business type.'});
+  const cleanName=String(name||'').trim(),cleanPhone=String(phone||'').replace(/[\s()-]/g,'');
+  if(cleanName.length<2||cleanName.length>120||!/^\+?[0-9]{8,15}$/.test(cleanPhone)||!location||!String(business||'').trim())return res.status(400).json({error:'Enter a full name, valid phone number, location and business type.'});
   const id='TB-'+Date.now().toString(36).toUpperCase()+'-'+Math.floor(Math.random()*900+100);
   const client=await pool.connect();
   try{
