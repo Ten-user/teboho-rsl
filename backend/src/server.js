@@ -41,7 +41,7 @@ app.post('/auth/register',asyncRoute(async(req,res)=>{
     const account=await client.query('INSERT INTO taxpayers(name,email,password_hash,trader_id) VALUES($1,$2,$3,$4) RETURNING id,email,name,trader_id',[String(name).trim(),normalized,hash,trader.rows[0].id]);
     await client.query('INSERT INTO audit(trader_id,action,actor) VALUES($1,$2,$3)',[traderId,'Taxpayer self-registration',normalized]);
     await client.query('COMMIT');
-    const u=account.rows[0],token=jwt.sign({sub:u.id,email:u.email,role:'taxpayer',traderId:u.trader_id},process.env.JWT_SECRET,{expiresIn:'8h'});
+    const u=account.rows[0],token=jwt.sign({sub:u.id,email:u.email,role:'taxpayer',name:u.name,traderId:u.trader_id},process.env.JWT_SECRET,{expiresIn:'8h'});
     res.status(201).json({token,user:{id:u.id,email:u.email,name:u.name,role:'taxpayer',traderId:u.trader_id}});
   }catch(e){await client.query('ROLLBACK');throw e}finally{client.release()}
 }));
